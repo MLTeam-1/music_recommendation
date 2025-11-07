@@ -1,0 +1,23 @@
+# 데이터 파일
+*.csv
+*.txt
+*.db
+*.dat
+*.h5
+*.tsv
+*.gz
+
+
+
+/MSD-dataset/data/
+/lastfm-dataset/data/
+
+# ==================================
+# 파이썬 가상환경, 캐시 등
+# ==================================
+/venv/
+/env/
+.env
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
