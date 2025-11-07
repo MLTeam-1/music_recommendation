@@ -1,0 +1,46 @@
+# ======================================================================================
+# Conda 환경 설정 파일 for Music Recommendation System
+#
+# [사용법]
+# 이 프로젝트와 동일한 환경을 새로 생성하려면, 터미널에 아래 명령어를 입력하세요:
+# > conda env create -f environment.yml
+#
+# [환경 활성화]
+# > conda activate music-rec
+# ======================================================================================
+
+# 새로 생성될 Conda 환경의 이름입니다.
+name: music-rec
+
+# 패키지를 다운로드할 채널 목록입니다. conda-forge를 우선으로 사용하면
+# 다양한 운영체제에서의 호환성 문제를 줄일 수 있습니다.
+channels:
+  - conda-forge
+  - defaults
+
+# 설치할 패키지 목록입니다.
+dependencies:
+  # --- 1. 기본 실행 환경 ---
+  - python=3.9
+
+  # --- 2. 데이터 분석 및 처리 핵심 라이브러리 ---
+  - pandas
+  - numpy
+  - scikit-learn
+
+  # --- 3. 추천 시스템 모델링 라이브러리 ---
+  # surprise와 implicit은 pip으로 설치하는 것이 더 안정적일 수 있습니다.
+  - pip
+
+  # --- 4. 데이터 시각화 라이브러리 ---
+  - matplotlib
+  - seaborn
+
+  # --- 5. 기타 유틸리티 ---
+  - tqdm # 처리 진행률 표시
+
+  # --- 6. Pip을 통해 설치할 패키지 ---
+  # Conda 채널에 없거나, pip 설치가 권장되는 패키지 목록입니다.
+  - pip:
+    - scikit-surprise
+    - implicit
