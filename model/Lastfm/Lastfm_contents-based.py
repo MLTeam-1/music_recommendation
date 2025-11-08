@@ -1,174 +1,193 @@
 # ======================================================================================
 # [프로젝트] 이기종 음악 데이터셋을 활용한 개인화 추천 시스템 구축
-# [스크립트 목적] 콘텐츠 기반 필터링(Content-Based Filtering) 모델 구현 및 성능 평가
-# [End-to-End 단계] 5. 모델링(Modeling) 및 6. 평가(Evaluation)
-#
-# [설명]
-# 이 스크립트는 콘텐츠 기반 필터링의 핵심 로직을 구현합니다.
-# 각 사용자가 과거에 청취한 노래들의 '장르' 정보를 바탕으로, 해당 사용자의 고유한
-# '음악 취향 프로필 벡터(User Profile Vector)'를 생성합니다.
-#
-# 그 후, 학습에 사용되지 않은 Test Set의 노래들에 대해, 이 프로필 벡터와의
-# '코사인 유사도(Cosine Similarity)'를 계산하여 예측 선호도를 구합니다.
-#
-# 최종적으로, 이 예측 선호도를 기반으로 Top-N 추천 성능 지표(Precision@k, Recall@k)를
-# 계산하여 모델의 성능을 정량적으로 평가하는 것을 목표로 합니다.
+# [스크립트 목적] SVD 모델에 대한 다차원 심층 성능 평가 및 사례 연구
+# [End-to-End 단계] 6. 평가(Advanced Evaluation & Case Study)
 # ======================================================================================
 
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from tqdm import tqdm
-
-from sklearn.model_selection import train_test_split
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+import random
+
+# Surprise 라이브러리
+from surprise import SVD, Dataset, Reader
+from surprise.model_selection import train_test_split
+from surprise import accuracy
 
 # --- 1. 설정 ---
-# 이 섹션에서는 모델과 실험에 사용될 주요 파라미터들을 정의합니다.
-FINAL_FILTERED_CSV = '../../data/final-lastfm-data.csv' # 전처리가 완료된 데이터 파일
+FINAL_MERGED_CSV = '../../data/final-lastfm-data.csv'
+K = 10
+Eth = 10
 # -----------------
 
 
-# --- 2. 데이터 로딩 ---
-# 이 섹션에서는 CSV 파일을 불러와 모델 학습에 적합한 형태로 가공합니다.
+# --- 2. 데이터 로딩 및 전처리 ---
 try:
-    print(f"'{FINAL_FILTERED_CSV}' 파일을 읽는 중...")
-    df = pd.read_csv(FINAL_FILTERED_CSV)
-    # SVD 모델과의 공정한 비교를 위해, 동일하게 로그 변환된 'play_count'를 'rating'으로 사용합니다.
-    df['rating'] = np.log1p(df['play_count']) 
-    print("-> 로딩 완료.")
+    df = pd.read_csv(FINAL_MERGED_CSV)
 except FileNotFoundError:
-    print(f"오류: '{FINAL_FILTERED_CSV}' 파일을 찾을 수 없습니다.")
+    print(f"오류: '{FINAL_MERGED_CSV}' 파일을 찾을 수 없습니다.")
     exit()
+
+print(f"청취횟수가 {Eth}회 이상인 유저만 포함")
+user_counts = df['user_id'].value_counts()
+active_users = user_counts[user_counts >= Eth].index
+df = df[df['user_id'].isin(active_users)]
+print(f"전체 데이터 수 : {df['user_id'].count()}")
+df['rating'] = np.log1p(df['play_count'])
 # -----------------
 
-    
-# --- 3. 데이터 분리 (학습용 / 평가용) ---
-# 이 섹션은 모델의 성능을 공정하게 평가하기 위해 데이터를 분리하는 매우 중요한 단계입니다.
-# 데이터 유출(Data Leakage)을 방지하는 것이 핵심 목표입니다.
 
-# [핵심] 안정적인 데이터 분할을 위한 사용자 필터링
-# train_test_split의 'stratify' 옵션은 각 사용자의 데이터를 지정된 비율로 나눕니다.
-# 만약 사용자의 기록이 너무 적으면(예: 1개), 8:2로 나눌 수 없어 오류가 발생합니다.
-# 따라서, 분할에 필요한 최소 기록 수를 가진 사용자만 남겨 안정성을 확보합니다.
-MIN_RECORDS_FOR_SPLIT = 15
-user_counts = df['user_id'].value_counts()
-users_with_enough_records = user_counts[user_counts >= MIN_RECORDS_FOR_SPLIT].index
-df_filtered_for_split = df[df['user_id'].isin(users_with_enough_records)]
-
-print(f"\n데이터 분할을 위해, 청취 기록이 {MIN_RECORDS_FOR_SPLIT}개 미만인 사용자들을 제외합니다.")
-print(f"원본 데이터: {len(df)}개 -> 필터링 후 데이터: {len(df_filtered_for_split)}개")
-print(f"분석 대상 사용자 수: {len(users_with_enough_records)}명")
+# --- 3. Surprise 데이터셋 생성 및 분리 ---
+reader = Reader(rating_scale=(df['play_count'].min(), df['play_count'].max()))
+data = Dataset.load_from_df(df[['user_id', 'title', 'play_count']], reader)
+reader_log = Reader(rating_scale=(df['rating'].min(), df['rating'].max()))
+data_log = Dataset.load_from_df(df[['user_id', 'title', 'rating']], reader_log)
 
 print("\n데이터를 Train Set (80%)과 Test Set (20%)으로 분리합니다...")
-# [핵심] 'stratify' 옵션 사용 이유:
-# 이 옵션을 사용하면, 필터링된 모든 사용자가 Train Set과 Test Set에 8:2 비율로
-# 공평하게 포함됩니다. 이를 통해 특정 사용자가 Test Set에 없어 평가가 불가능해지는
-# 문제를 방지하고, 모든 사용자에 대해 모델을 평가할 수 있게 됩니다.
-train_df, test_df = train_test_split(
-    df_filtered_for_split, 
-    test_size=0.2, 
-    stratify=df_filtered_for_split['user_id'], 
-    random_state=42 # 재현성을 위해 random_state 고정
-)
-print(f"-> Train Set: {len(train_df)}개, Test Set: {len(test_df)}개")
+trainset, testset = train_test_split(data, test_size=0.2, random_state=41)
+trainset_log, testset_log = train_test_split(data_log, test_size=0.2, random_state=41)
+print("-> 데이터 분리 완료.")
 # -----------------
 
 
-# --- 4. 콘텐츠 기반 필터링 예측 수행 ---
-# 이 섹션에서는 Test Set의 각 (사용자, 아이템) 쌍에 대한 선호도를 예측합니다.
-
-print("\n콘텐츠 기반 모델로 Test Set의 평점을 예측합니다...")
-# 노래의 콘텐츠 정보(장르 벡터)를 빠르게 조회할 수 있도록 딕셔너리 형태로 구축
-# 참고: 노래의 장르 정보 자체는 사용자의 청취 기록과 무관한 '사전 정보'이므로,
-#       전체 데이터프레임(df)을 사용하여 구축해도 데이터 유출에 해당하지 않습니다.
-song_features_df = df.drop_duplicates(subset='title').set_index('title')
-main_genres = ['Classic Rock', 'Hard Rock', 'Alternative & Indie Rock', 'Pop & Folk Rock', 'Pop', 'Jazz & Blues', 'R&B & Funk', 'Hip Hop', 'Electronic & Dance', 'Folk & Country', 'Reggae', 'Other']
-existing_genre_cols = [col for col in main_genres if col in song_features_df.columns]
-song_features_matrix_map = {title: features for title, features in zip(song_features_df.index, song_features_df[existing_genre_cols].values)}
-
-predictions = []
-# tqdm: 처리 진행 상황을 시각적으로 보여주는 라이브러리
-for user_id, user_test_data in tqdm(test_df.groupby('user_id'), desc="Predicting for users"):
-    # [Step 1] 사용자 프로필 생성 (오직 Train Set 데이터만 사용)
-    user_train_data = train_df[train_df['user_id'] == user_id]
-    if user_train_data.empty:
-        continue # Stratify 옵션 덕분에 이 경우는 거의 발생하지 않음
-        
-    # 사용자가 들었던 노래들의 장르 벡터에 'play_count'를 가중치로 곱하여 합산 -> 가중 평균
-    # 즉, 많이 들은 노래의 장르가 사용자의 취향에 더 큰 영향을 미치도록 합니다.
-    user_genre_data = user_train_data[existing_genre_cols]
-    play_counts = user_train_data['play_count']
-    user_profile_vector = (user_genre_data.mul(play_counts, axis=0).sum() / play_counts.sum()).values.reshape(1, -1)
-    
-    # [Step 2] Test Set 아이템에 대한 선호도 예측
-    for index, row in user_test_data.iterrows():
-        title = row['title']
-        true_rating = row['rating'] # 실제 정답 값 (평가에 사용)
-        
-        if title in song_features_matrix_map:
-            song_vector = song_features_matrix_map[title].reshape(1, -1)
-            # [핵심 로직] 사용자 프로필 벡터와 노래의 장르 벡터 간의 코사인 유사도를 계산
-            # 이 유사도 점수(0~1)가 바로 모델이 예측한 '예상 선호도(est)'가 됩니다.
-            estimated_rating = cosine_similarity(user_profile_vector, song_vector)[0][0]
-            
-            # 평가를 위해 예측 결과를 저장
-            predictions.append({'uid': user_id, 'iid': title, 'r_ui': true_rating, 'est': estimated_rating})
+# --- 4. 모델 학습 ---
+print("\nTrain Set을 사용하여 SVD 모델을 학습합니다...")
+algo_for_evaluation = SVD(n_factors=100, n_epochs=20, random_state=42)
+algo_for_evaluation_log = SVD(n_factors=100, n_epochs=20, random_state=42)
+algo_for_evaluation.fit(trainset)
+algo_for_evaluation_log.fit(trainset_log)
+print("-> 모델 학습 완료.")
 # -----------------
 
 
-# --- 5. 모델 성능 평가 ---
-# 이 섹션에서는 저장된 예측 결과를 바탕으로 모델의 성능을 정량적으로 측정합니다.
-print("\n" + "="*60)
-print("▶ 최종 모델 성능 평가 결과 (Content-Based Filtering)")
-print("="*60)
-
-# 5-a. 예측 정확도 지표 (RMSE, MAE)
-true_ratings = [p['r_ui'] for p in predictions]
-estimated_ratings = [p['est'] for p in predictions]
-
-# [중요] 코사인 유사도(0~1)와 실제 rating(로그 변환된 play_count)은 스케일이 다릅니다.
-# 따라서, RMSE/MAE는 두 값의 차이를 보여줄 뿐, 모델의 '랭킹' 성능을 직접적으로
-# 나타내지는 않으므로 '참고용'으로만 해석해야 합니다.
-rmse = np.sqrt(mean_squared_error(true_ratings, estimated_ratings))
-mae = mean_absolute_error(true_ratings, estimated_ratings)
-
-print("\n[1. 예측 정확도 지표 (참고용)]\n")
-print(f"RMSE: {rmse:.4f}")
-print(f"MAE:  {mae:.4f}")
-
-# 5-b. Top-N 추천 성능 지표 (Precision@k, Recall@k)
-# 이 지표들이야말로 추천 목록의 품질을 측정하는 핵심적인 성능 척도입니다.
+# --- 5. 평가 함수 및 데이터 준비 ---
 def precision_recall_at_k_implicit(predictions, k=10):
     user_est_true = defaultdict(list)
-    for p in predictions:
-        user_est_true[p['uid']].append((p['est'], p['r_ui']))
-
-    precisions, recalls = {}, {}
+    for uid, _, true_r, est, _ in predictions:
+        user_est_true[uid].append((est, true_r))
+    precisions, recalls = dict(), dict()
     for uid, user_ratings in user_est_true.items():
         user_ratings.sort(key=lambda x: x[0], reverse=True)
         n_rel = sum((true_r > 0) for (_, true_r) in user_ratings)
         n_rel_and_rec_k = sum(((true_r > 0)) for (_, true_r) in user_ratings[:k])
         precisions[uid] = n_rel_and_rec_k / k if k != 0 else 0
         recalls[uid] = n_rel_and_rec_k / n_rel if n_rel != 0 else 0
-    return sum(p for p in precisions.values()) / len(precisions), \
-           sum(r for r in recalls.values()) / len(recalls)
-           
-test_user_counts = test_df['user_id'].value_counts()
-# K값을 임의로 정하는 대신, Test Set의 사용자별 평균 아이템 수를 기준으로 설정
-# 이는 데이터에 기반한 합리적인 K값 설정 방식입니다.
-average_items_in_testset = test_user_counts.mean()
-print(f"\nTest Set에서 사용자별 평균 청취 기록(정답)의 수: {average_items_in_testset:.2f} 개")
+    return sum(p for p in precisions.values()) / len(precisions), sum(r for r in recalls.values()) / len(recalls)
 
-k = int(round(average_items_in_testset))
+song_features_df = df.drop_duplicates(subset='title').set_index('title')
+main_genres = ['Classic Rock', 'Hard Rock', 'Alternative & Indie Rock', 'Pop & Folk Rock', 'Pop', 'Jazz & Blues', 'R&B & Funk', 'Hip Hop', 'Electronic & Dance', 'Folk & Country', 'Reggae', 'Other']
+existing_genre_cols = [col for col in main_genres if col in song_features_df.columns]
+song_features_matrix_map = {title: features for title, features in zip(song_features_df.index, song_features_df[existing_genre_cols].values)}
 
-# 데이터 기반으로 설정된 k값 주변의 여러 k에 대해 성능을 종합적으로 확인
-for k_val in range(max(k-5, 1), k+5):
-    precision, recall = precision_recall_at_k_implicit(predictions, k=k_val)
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) != 0 else 0
-    print(f"\n[2. Top-{k_val} 추천 성능 지표]\n")
-    print(f"Precision@{k_val} (Implicit): {precision:.4f}")
-    print(f"Recall@{k_val} (Implicit)   : {recall:.4f}")
-    print(f"F1-Score@{k_val} : {f1_score:.4f}")
-# ======================================================================================
+train_records = []
+for u, i, r in trainset.all_ratings():
+    train_records.append({'user_id': trainset.to_raw_uid(u), 'title': trainset.to_raw_iid(i), 'play_count': r})
+train_df = pd.DataFrame(train_records)
+
+def calculate_genre_similarity(predictions, train_df, k=10):
+    user_est_true = defaultdict(list)
+    for uid, iid, _, est, _ in predictions:
+        user_est_true[uid].append((est, iid))
+    all_users_avg_similarities = []
+    for uid, user_ratings in user_est_true.items():
+        user_ratings.sort(key=lambda x: x[0], reverse=True)
+        recommended_items = [iid for est, iid in user_ratings[:k]]
+        user_train_data = train_df[train_df['user_id'] == uid]
+        if not user_train_data.empty:
+            merged_df = pd.merge(user_train_data, song_features_df[existing_genre_cols], left_on='title', right_index=True, how='inner')
+            play_counts = merged_df['play_count']
+            if play_counts.sum() > 0:
+                user_profile_vector = (merged_df[existing_genre_cols].mul(play_counts, axis=0).sum() / play_counts.sum()).values.reshape(1, -1)
+                current_user_similarities = []
+                for song_title in recommended_items:
+                    if song_title in song_features_matrix_map:
+                        song_vector = song_features_matrix_map[song_title].reshape(1, -1)
+                        similarity = cosine_similarity(user_profile_vector, song_vector)[0][0]
+                        current_user_similarities.append(similarity)
+                if current_user_similarities:
+                    all_users_avg_similarities.append(np.mean(current_user_similarities))
+    return np.mean(all_users_avg_similarities) if all_users_avg_similarities else 0
+# -----------------
+
+
+# --- 6. 💥💥💥 모델 성능 종합 평가 (정량 지표) 💥💥💥 ---
+predictions = algo_for_evaluation.test(testset)
+predictions_log = algo_for_evaluation_log.test(testset_log)
+
+print("\n" + "="*60)
+print("▶ 최종 모델 성능 평가 결과 (SVD: Log Transformation 효과 비교)")
+print("="*60)
+
+# 6-a. 예측 정확도 지표 (RMSE, MAE)
+print("\n[1. 예측 정확도 지표 (without log)]\n")
+accuracy.rmse(predictions, verbose=True)
+accuracy.mae(predictions, verbose=True)
+print("\n[1. 예측 정확도 지표 (with log)]\n")
+accuracy.rmse(predictions_log, verbose=True)
+accuracy.mae(predictions_log, verbose=True)
+
+# 6-b. Top-N 추천 성능 지표 (Precision@k, Recall@k)
+print(f"\n[2. Top-{K} 추천 성능 지표 (정답률)]\n")
+precision, recall = precision_recall_at_k_implicit(predictions, k=K)
+precision_log, recall_log = precision_recall_at_k_implicit(predictions_log, k=K)
+print(f"Precision@{K} : Without log : {precision:.4f}, With log :{precision_log:.4f}")
+print(f"Recall@{K}    : Without log : {recall:.4f}, With log : {recall_log:.4f}")
+f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) != 0 else 0
+f1_score_log = 2 * (precision_log * recall_log) / (precision_log + recall_log) if (precision_log + recall_log) != 0 else 0
+print(f"F1-Score@{K}  : Without log : {f1_score:.4f}, With log : {f1_score_log:.4f}")
+
+# 6-c. 콘텐츠 정렬 성능 (장르 유사도)
+print("\n" + "-"*60)
+print(f"\n[3. Top-{K} 콘텐츠 정렬 성능 (취향 일치도)]\n")
+avg_similarity = calculate_genre_similarity(predictions, train_df, k=K)
+avg_similarity_log = calculate_genre_similarity(predictions_log, train_df, k=K)
+print(f"Average Genre Similarity: Without log : {avg_similarity:.4f}, With log : {avg_similarity_log:.4f}")
+print("\n(설명: 추천된 노래들이 사용자의 기존 청취 장르와 평균적으로 얼마나 유사한지를 나타냅니다.)")
+print("="*60)
+
+
+# --- 7. 💥💥💥 사례 연구 (Case Study) 결과 출력 💥💥💥 ---
+print("\n" + "="*70)
+print(f"▶ 사례 연구: 콘텐츠 기반 모델의 랜덤 사용자 추천 분석") 
+print("="*70)
+
+user_predictions = defaultdict(list)
+for uid, iid, _, est, _ in predictions_log:
+    user_predictions[uid].append((iid, est))
+
+num_samples = min(5, len(user_predictions))
+random_users = random.sample(list(user_predictions.keys()), num_samples)
+
+for i, user_id in enumerate(random_users):
+    user_recs = sorted(user_predictions[user_id], key=lambda x: x[1], reverse=True)
+    recommendations = [iid for iid, est in user_recs[:K]]
+    
+    print(f"\n--- [Case {i+1}] User: {user_id} ---\n")
+    
+    user_train_data = train_df[train_df['user_id'] == user_id]
+    if not user_train_data.empty:
+        merged_df = pd.merge(user_train_data, song_features_df[existing_genre_cols], left_on='title', right_index=True, how='inner')
+        play_counts = merged_df['play_count']
+        if play_counts.sum() > 0:
+            user_profile_vector = (merged_df[existing_genre_cols].mul(play_counts, axis=0).sum() / play_counts.sum()).values
+            user_top_genres = sorted(zip(existing_genre_cols, user_profile_vector), key=lambda x: x[1], reverse=True)
+            
+            print("  [사용자 주요 취향 (Top 5 Genres)]")
+            for genre, score in user_top_genres[:5]:
+                if score > 0.01:
+                    print(f"    - {genre:<25} ({score:.2%})")
+            
+    print(f"\n  [Content-Based 추천 목록 (Top {K} Songs & Genres)]")
+    if not recommendations:
+        print("    (추천된 노래가 없습니다)")
+    else:
+        for song_title in recommendations:
+            print(f"    - {song_title}")
+            if song_title in song_features_matrix_map:
+                song_vector = song_features_matrix_map[song_title]
+                song_top_genres = sorted(zip(existing_genre_cols, song_vector), key=lambda x: x[1], reverse=True)
+                genre_str = ", ".join([f"{g} " for g, s in song_top_genres[:5] if s > 0.01])
+                print(f"      └─ Genres: {genre_str if genre_str else 'N/A'}")
+
+print("\n" + "="*70)
